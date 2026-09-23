@@ -202,6 +202,16 @@ def test_all_scales_zero_gives_no_density():
     assert jnp.isneginf(mixture.log_prob(jnp.asarray(0.3)))
 
 
+def test_a_zero_scale_passes_argument_validation():
+    # -inf is the log of a zero rate, so it must be accepted as a valid log-scale even
+    # when the arguments are validated; NaN and +inf must still be rejected
+    scales = jnp.asarray([0.0, -jnp.inf, jnp.log(3.0)])
+    ScaledMixture(scales, _components(), validate_args=True)
+    for bad in (jnp.nan, jnp.inf):
+        with pytest.raises(ValueError):
+            ScaledMixture(scales.at[1].set(bad), _components(), validate_args=True)
+
+
 @pytest.mark.parametrize("sample_shape", [(), (4,), (2, 3)])
 def test_log_prob_shape(sample_shape):
     mixture = _mixture()

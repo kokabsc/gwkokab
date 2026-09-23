@@ -265,13 +265,11 @@ def NDIsotropicAndTruncatedNormalMixture(
             probs=mixing_probs, validate_args=validate_args
         ),
         component_distributions=[isotropic_component, gaussian_component],
+        # ``gaussian_low``/``gaussian_high`` may be ``None`` (an unbounded component), so
+        # take the supports from the components rather than building intervals by hand.
         support=any_constraint((
-            constraints.independent(
-                constraints.interval(isotropic_low, isotropic_high), batch_dim
-            ),
-            constraints.independent(
-                constraints.interval(gaussian_low, gaussian_high), batch_dim
-            ),
+            isotropic_component.support,
+            gaussian_component.support,
         )),
         validate_args=validate_args,
     )

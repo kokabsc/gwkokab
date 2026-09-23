@@ -80,8 +80,10 @@ class ScaledMixture(Distribution):
        ()
     """
 
+    # A component with zero rate has log-scale -inf, so the constraint must admit -inf
+    # (``real_vector`` does not) while still rejecting NaN and +inf.
     arg_constraints = {
-        "log_scales": constraints.real_vector,
+        "log_scales": constraints.independent(constraints.less_than(jnp.inf), 1),
     }
     pytree_data_fields = ("_component_distributions", "_support", "log_scales")
     pytree_aux_fields = ("_mixture_size",)

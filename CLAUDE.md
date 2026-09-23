@@ -102,6 +102,8 @@ See `docs/source/examples/ecc_plus_spin/` for a complete worked run: `synthetic_
 
 `tests/` mirrors `src/` one-to-one (`tests/gwkokab/models/mass/test_models.py` ↔ `src/gwkokab/models/mass/_models.py`). Several packages carry same-named modules, so test basenames collide; `--import-mode=importlib` in `addopts` is what makes that legal — do not drop it.
 
+`tests/conftest.py` calls `numpyro.enable_validation(False)` at import: NumPyro >= 0.22 validates distribution arguments by default, and with `filterwarnings = ["error"]` its out-of-support `log_prob` warning would fail every test that integrates over a grid or mixes components with different supports. Tests that check validation pass `validate_args=True` explicitly.
+
 Shared fixtures live in five conftests and are worth reusing before writing new setup:
 
 - `tests/gwkokab/conftest.py` — `linear_model_file` (writes an HDF5 network that is exactly an affine map, so Poisson means have closed forms), `injections_file`.

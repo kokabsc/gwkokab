@@ -298,6 +298,17 @@ def test_isotropic_mixture_accepts_unbounded_gaussian_component():
     assert_allclose(model.log_prob(jnp.zeros(2)), jnp.log(0.25), rtol=1e-12)
 
 
+def test_isotropic_mixture_unbounded_gaussian_component_under_validation():
+    # with argument validation on, ``log_prob`` checks the declared support, which must
+    # therefore be well defined when the gaussian component has no bounds
+    model = NDIsotropicAndTruncatedNormalMixture(
+        zeta=0.0,
+        **{**ISOTROPIC_AND_NORMAL, "gaussian_low": None, "gaussian_high": None},
+        validate_args=True,
+    )
+    assert_allclose(model.log_prob(jnp.zeros(2)), jnp.log(0.25), rtol=1e-12)
+
+
 def test_isotropic_mixture_is_a_convex_combination():
     zeta = 0.4
     value = jnp.asarray([[0.3, -0.2], [-0.9, 0.9]])
