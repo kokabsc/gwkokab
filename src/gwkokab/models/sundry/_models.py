@@ -1,6 +1,12 @@
 # Copyright 2023 The GWKokab Authors
 # SPDX-License-Identifier: Apache-2.0
 
+"""Generic models that do not belong to a single physical parameter block.
+
+These are mixture constructions -- of truncated normals, or of a uniform and a normal
+component -- that show up in more than one place: as spin magnitude models, as tilt
+models, and as generic two-component descriptions of an arbitrary bounded parameter.
+"""
 
 from typing import Optional
 
@@ -259,13 +265,11 @@ def NDIsotropicAndTruncatedNormalMixture(
             probs=mixing_probs, validate_args=validate_args
         ),
         component_distributions=[isotropic_component, gaussian_component],
+        # ``gaussian_low``/``gaussian_high`` may be ``None`` (an unbounded component), so
+        # take the supports from the components rather than building intervals by hand.
         support=any_constraint((
-            constraints.independent(
-                constraints.interval(isotropic_low, isotropic_high), batch_dim
-            ),
-            constraints.independent(
-                constraints.interval(gaussian_low, gaussian_high), batch_dim
-            ),
+            isotropic_component.support,
+            gaussian_component.support,
         )),
         validate_args=validate_args,
     )

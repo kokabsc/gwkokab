@@ -32,7 +32,7 @@ dependencies = [
     "chex>=0.1.87",
     "corner>=2.2.3",
     "equinox>=0.11.3",
-    "flowMC==0.4.5",
+    "flowmc==0.6.1",
     "glasbey>=0.3.0",
     "h5py>=3.12.1",
     "ipykernel>=7.2.0",
@@ -44,7 +44,7 @@ dependencies = [
     "nbconvert>=7.17.1",
     "numpy<3",
     "numpyro>=0.19.0",
-    "optax<0.2.7",
+    "optax>=0.2.7",
     "pandas>=2.2.0",
     "papermill>=2.7.0",
     "plotly>=6.7.0",
@@ -78,26 +78,28 @@ Homepage = "https://github.com/kokabsc/gwkokab"
 Issues = "https://github.com/kokabsc/gwkokab/issues"
 
 [project.scripts]
-analytical_ecc_matters = "gwkokab.analysis.ecc_matters.analytical:main"
-analytical_multisource = "gwkokab.analysis.multisource.analytical:main"
-analytical_n_pls_m_gs = "gwkokab.analysis.n_pls_m_gs.analytical:main"
-analytical_subpopulation = "gwkokab.analysis.subpopulation.analytical:main"
+analytical_gwalk_ecc_matters = "gwkokab.analysis.ecc_matters.analytical_gwalk:main"
+analytical_gwalk_multisource = "gwkokab.analysis.multisource.analytical_gwalk:main"
+analytical_gwalk_n_pls_m_gs = "gwkokab.analysis.n_pls_m_gs.analytical_gwalk:main"
+analytical_gwalk_subpopulation = "gwkokab.analysis.subpopulation.analytical_gwalk:main"
 discrete_ecc_matters = "gwkokab.analysis.ecc_matters.discrete:main"
 discrete_multisource = "gwkokab.analysis.multisource.discrete:main"
 discrete_n_pls_m_gs = "gwkokab.analysis.n_pls_m_gs.discrete:main"
 discrete_subpopulation = "gwkokab.analysis.subpopulation.discrete:main"
-gwk_analytical_data_loader_cfg_template = "gwkokab.analysis.core.inference_io._analytical:_data_loader_cfg_template"
+gwk_analytical_gwalk_data_loader_cfg_template = "gwkokab.analysis.core.inference_io._analytical_gwalk:_data_loader_cfg_template"
 gwk_delete_chains = "gwkokab_scripts.delete_chains:main"
-gwk_diag_mass_matrix = "gwkokab_scripts.diag_mass_matrix:main"
+gwk_diag_condition_matrix = "gwkokab_scripts.diag_condition_matrix:main"
 gwk_discrete_data_loader_cfg_template = "gwkokab.analysis.core.inference_io._discrete:_data_loader_cfg_template"
 gwk_flowMC_cfg_template = "gwkokab.analysis.core.inference_io._sampler:_dump_flowMC_cfg"
 gwk_flowMC_info = "gwkokab_scripts.flowMC_info:main"
 gwk_h5repack = "gwkokab_scripts.h5repack:main"
+gwk_hist = "gwkokab_scripts.hist:main"
 gwk_numpyro_cfg_template = "gwkokab.analysis.core.inference_io._sampler:_dump_numpyro_cfg"
 gwk_numpyro_dense_mass_structure = "gwkokab_scripts.numpyro_dense_mass_structure:main"
 gwk_param_lens = "gwkokab_scripts.param_lens:main"
 gwk_report = "gwkokab.analysis.report.generate_report:generate_report"
-synthetic_analytical_pe = "gwkokab.analysis.core.synthetic_pe:synthetic_analytical_pe_main"
+gwk_scatter2d = "gwkokab_scripts.scatter2d:main"
+synthetic_analytical_gwalk_pe = "gwkokab.analysis.core.synthetic_pe:synthetic_analytical_gwalk_pe_main"
 synthetic_discrete_pe = "gwkokab.analysis.core.synthetic_pe:synthetic_discrete_pe_main"
 synthetic_events_ecc_matter = "gwkokab.analysis.ecc_matters.synthetic_events:main"
 synthetic_events_n_pls_m_gs = "gwkokab.analysis.n_pls_m_gs.synthetic_events:main"
@@ -138,7 +140,11 @@ wrap-descriptions = 88
 syntax = "numpy"
 
 [tool.pytest.ini_options]
-addopts = ["-v", "--color=yes"]
+# ``importlib`` mode lets the test tree mirror the package layout: several packages
+# carry a module of the same name (``models/mass/_models.py``, ``models/spin/_models.py``,
+# ...), so their test files share a basename too, which the default ``prepend`` mode
+# rejects.
+addopts = ["-v", "--color=yes", "--import-mode=importlib"]
 doctest_optionflags = [
     "ELLIPSIS",
     "NORMALIZE_WHITESPACE",

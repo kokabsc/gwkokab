@@ -30,7 +30,7 @@ jobs:
     needs: [prek]
     name: "build (py ${{ matrix.python-version }} on ${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -46,7 +46,7 @@ jobs:
       JAX_PLATFORMS: "cpu"
       JAX_TRACEBACK_FILTERING: "off"
       PY_COLORS: 1
-      XLA_FLAGS: "--xla_force_host_platform_device_count=8"
+      XLA_FLAGS: "--xla_force_host_platform_device_count=4"
 
     steps:
       - uses: actions/checkout@v7
@@ -85,7 +85,7 @@ jobs:
       JAX_PLATFORMS: "cpu"
       JAX_TRACEBACK_FILTERING: "off"
       PY_COLORS: 1
-      XLA_FLAGS: "--xla_force_host_platform_device_count=8"
+      XLA_FLAGS: "--xla_force_host_platform_device_count=4"
     steps:
       - uses: actions/checkout@v7
       - name: Install uv

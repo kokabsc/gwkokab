@@ -1,6 +1,26 @@
 # Copyright 2023 The GWKokab Authors
 # SPDX-License-Identifier: Apache-2.0
 
+"""The flowMC sampler backend.
+
+:class:`FlowMCBase` supplies ``driver`` for analyses run with flowMC, which alternates a
+gradient-based local sampler with global proposals drawn from a normalizing flow trained
+on the chains so far. Chains, acceptance rates, training loss and the thinned posterior
+samples are written to the output HDF5 after every loop, so a run can be inspected -- or
+salvaged -- while it is still going.
+
+The backend is chosen at runtime from ``sampler_cfg.json``'s ``sampler_name``, not by
+the console script.
+
+:class:`Local_Global_Sampler_Bundle` and :class:`Sampler` are vendored from `flowMC
+<https://github.com/kazewong/flowMC>`_, with their own copyright notices, so that the
+per-loop checkpointing can be woven into the sampling loop. They are marked not to be
+modified.
+
+See Also
+--------
+gwkokab.analysis.core.numpyro_base : The alternative sampler backend.
+"""
 
 from typing import Any, Callable, Dict, List, Literal, Optional
 
@@ -11,11 +31,11 @@ import numpy as np
 import tqdm
 from flowMC.resource.base import Resource
 from flowMC.resource.buffers import Buffer
-from flowMC.resource.local_kernel.base import ProposalBase
-from flowMC.resource.local_kernel.MALA import MALA
+from flowMC.resource.kernel.HMC import HMC
+from flowMC.resource.kernel.MALA import MALA
+from flowMC.resource.kernel.NF_proposal import NFProposal
 from flowMC.resource.logPDF import LogPDF
-from flowMC.resource.nf_model.NF_proposal import NFProposal
-from flowMC.resource.nf_model.rqSpline import MaskedCouplingRQSpline
+from flowMC.resource.model.nf_model.rqSpline import MaskedCouplingRQSpline
 from flowMC.resource.optimizer import Optimizer
 from flowMC.resource.states import State
 from flowMC.resource_strategy_bundle.base import ResourceStrategyBundle
@@ -25,7 +45,7 @@ from flowMC.strategy.take_steps import TakeGroupSteps, TakeSerialSteps
 from flowMC.strategy.train_model import TrainModel
 from flowMC.strategy.update_state import UpdateState
 from jax import numpy as jnp
-from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
+from jaxtyping import Array, Float, PRNGKeyArray
 from loguru import logger
 
 from gwkokab.analysis.core.analysis_base import analysis_base_arg_parser, AnalysisBase
@@ -37,160 +57,6 @@ from gwkokab.analysis.utils.literals import (
     SAMPLES_GROUP_NAME,
 )
 from gwkokab.models.utils import JointDistribution
-from gwkokab.utils.exceptions import LoggedValueError
-
-
-# WARNING: do not change anything in this class
-
-
-# Copyright (c) 2022 Kaze Wong & contributor
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
-class _HMC(ProposalBase):
-    """Hamiltonian Monte Carlo sampler class building the hmc_sampler method from target
-    logpdf.
-
-    Args:
-        logpdf: target logpdf function
-        jit: whether to jit the sampler
-        params: dictionary of parameters for the sampler
-    """
-
-    mass_matrix: Float[Array, " n_dim n_dim"]
-    step_size: float
-    leapfrog_coefs: Float[Array, " n_leapfrog n_dim"]
-
-    @property
-    def n_leapfrog(self) -> int:
-        return self.leapfrog_coefs.shape[0] - 2
-
-    def __init__(
-        self,
-        mass_matrix: Float[Array, " n_dim n_dim"],
-        step_size: float = 0.1,
-        n_leapfrog: int = 10,
-    ):
-        self.mass_matrix = mass_matrix
-        self.step_size = step_size
-
-        coefs = jnp.ones((n_leapfrog + 2, 2))
-        coefs = coefs.at[0].set(jnp.array([0, 0.5]))
-        coefs = coefs.at[-1].set(jnp.array([1, 0.5]))
-        self.leapfrog_coefs = coefs
-
-    def get_initial_hamiltonian(
-        self,
-        potential: Callable[[Float[Array, " n_dim"], PyTree], Float[Array, "1"]],
-        kinetic: Callable[
-            [Float[Array, " n_dim"], Float[Array, " n_dim n_dim"]], Float[Array, "1"]
-        ],
-        rng_key: PRNGKeyArray,
-        position: Float[Array, " n_dim"],
-        data: PyTree,
-    ):
-        L = jnp.linalg.cholesky(self.mass_matrix)
-        momentum = L @ jax.random.normal(rng_key, shape=position.shape)
-
-        return potential(position, data) + kinetic(momentum, self.mass_matrix)
-
-    def leapfrog_kernel(self, kinetic, potential, carry, extras):
-        position, momentum, data, metric, index = carry
-
-        # Note: jax.grad(kinetic) with respect to momentum will return M^-1 @ p
-        # which is the velocity, effectively handling the dense matrix logic.
-        position = position + self.step_size * self.leapfrog_coefs[index][0] * jax.grad(
-            kinetic
-        )(momentum, metric)
-
-        momentum = momentum - self.step_size * self.leapfrog_coefs[index][1] * jax.grad(
-            potential
-        )(position, data)
-
-        index = index + 1
-        return (position, momentum, data, metric, index), extras
-
-    def leapfrog_step(
-        self,
-        leapfrog_kernel: Callable,
-        position: Float[Array, " n_dim"],
-        momentum: Float[Array, " n_dim"],
-        data: PyTree,
-        metric: Float[Array, " n_dim n_dim"],
-    ) -> tuple[Float[Array, " n_dim"], Float[Array, " n_dim"]]:
-        (position, momentum, data, metric, _), _ = jax.lax.scan(
-            leapfrog_kernel,
-            (position, momentum, data, metric, 0),
-            jnp.arange(self.n_leapfrog + 2),
-        )
-        return position, momentum
-
-    def kernel(
-        self,
-        rng_key: PRNGKeyArray,
-        position: Float[Array, " n_dim"],
-        log_prob: Float[Array, "1"],
-        logpdf: LogPDF | Callable[[Float[Array, " n_dim"], PyTree], Float[Array, "1"]],
-        data: PyTree,
-    ) -> tuple[Float[Array, " n_dim"], Float[Array, "1"], Int[Array, "1"]]:
-        def potential(x: Float[Array, " n_dim"], data: PyTree) -> Float[Array, "1"]:
-            return -logpdf(x, data)
-
-        # CHANGED: Kinetic energy for dense mass matrix
-        # K(p) = 0.5 * p^T * M^-1 * p
-        def kinetic(
-            p: Float[Array, " n_dim"], metric: Float[Array, " n_dim n_dim"]
-        ) -> Float[Array, "1"]:
-            # We solve Mx = p for x (which is M^-1 p), then dot with p
-            velocity = jnp.linalg.solve(metric, p)
-            return 0.5 * jnp.dot(p, velocity)
-
-        leapfrog_kernel = jax.tree_util.Partial(
-            self.leapfrog_kernel, kinetic, potential
-        )
-        leapfrog_step = jax.tree_util.Partial(self.leapfrog_step, leapfrog_kernel)
-
-        key1, key2 = jax.random.split(rng_key)
-
-        # CHANGED: Correct Sampling of Momentum ~ N(0, M)
-        # We need the lower triangular matrix L such that L @ L.T = M
-        L = jnp.linalg.cholesky(self.mass_matrix)
-        momentum = L @ jax.random.normal(key1, shape=position.shape)
-
-        H = -log_prob + kinetic(momentum, self.mass_matrix)
-
-        proposed_position, proposed_momentum = leapfrog_step(
-            position, momentum, data, self.mass_matrix
-        )
-
-        proposed_PE = potential(proposed_position, data)
-        proposed_ham = proposed_PE + kinetic(proposed_momentum, self.mass_matrix)
-        log_acc = H - proposed_ham
-        log_uniform = jnp.log(jax.random.uniform(key2))
-
-        do_accept = log_uniform < log_acc
-
-        position = jnp.where(do_accept, proposed_position, position)  # type: ignore
-        log_prob = jnp.where(do_accept, -proposed_PE, log_prob)  # type: ignore
-
-        return position, log_prob, do_accept
-
-    def print_parameters(self):
-        print("HMC parameters:")
-        print(f"step_size: {self.step_size}")
-        print(f"n_leapfrog: {self.n_leapfrog}")
-        print(f"condition_matrix shape: {self.condition_matrix.shape}")
-
-    def save_resource(self, path):
-        raise NotImplementedError
-
-    def load_resource(self, path):
-        raise NotImplementedError
 
 
 # WARNING: do not change anything in this class
@@ -226,7 +92,7 @@ class Local_Global_Sampler_Bundle(ResourceStrategyBundle):
         n_epochs: int,
         local_sampler_name: Literal["mala", "hmc"] = "mala",
         step_size: float = 1e-1,
-        mass_matrix: Array = 1.0,  # type: ignore
+        condition_matrix: Array = 1.0,  # type: ignore
         n_leapfrog: int = 10,
         chain_batch_size: int = 0,
         rq_spline_hidden_units: list[int] = [32, 32],
@@ -282,8 +148,8 @@ class Local_Global_Sampler_Bundle(ResourceStrategyBundle):
         if local_sampler_name.strip().lower() == "mala":
             local_sampler = MALA(step_size=step_size)
         else:
-            local_sampler = _HMC(
-                mass_matrix=mass_matrix,
+            local_sampler = HMC(
+                condition_matrix=condition_matrix,
                 step_size=step_size,
                 n_leapfrog=n_leapfrog,
             )
@@ -652,7 +518,13 @@ class Sampler:
 
 
 def _save_acceptances(resources: dict) -> None:
-    """Overwrites global and local acceptance rates in the HDF5 file."""
+    """Overwrite the global and local acceptance rates in the HDF5 file.
+
+    Parameters
+    ----------
+    resources : dict
+        The sampler's resource buffers. Missing or empty acceptance buffers are skipped.
+    """
     with h5py.File(INFERENCE_OUTPUT_FILENAME, "a") as f:
         for acc_type in ["global", "local"]:
             train_key = f"{acc_type}_accs_training"
@@ -668,7 +540,21 @@ def _save_acceptances(resources: dict) -> None:
 
 
 def _save_chains(resources: dict, labels: list[str], *, is_training: bool) -> None:
-    """Overwrites the chains and log probabilities in the HDF5 file."""
+    """Overwrite the chains and log probabilities in the HDF5 file.
+
+    Each chain is written as its own dataset under ``chains/<phase>/chain_<n>``, and the
+    parameter labels are recorded as a file attribute so the columns can be named
+    afterwards.
+
+    Parameters
+    ----------
+    resources : dict
+        The sampler's resource buffers.
+    labels : list[str]
+        Names of the sampled dimensions, in column order.
+    is_training : bool
+        Whether these are the training-phase chains or the production ones.
+    """
     phase = "train" if is_training else "prod"
     pos_key = f"positions_{'training' if is_training else 'production'}"
     lp_key = f"log_prob_{'training' if is_training else 'production'}"
@@ -700,7 +586,23 @@ def _save_samples(
     n_local_steps_per_loop: int,
     n_global_steps_per_loop: int,
 ) -> None:
-    """Overwrites the posterior samples dataset in the HDF5 file."""
+    r"""Overwrite the posterior samples dataset in the HDF5 file.
+
+    Only the local sampler's steps are kept: the global steps are normalizing-flow
+    proposals whose acceptance is already reflected in the local chain, so including them
+    would double-count. Rows containing :math:`-\infty` are dropped.
+
+    Parameters
+    ----------
+    resources : dict
+        The sampler's resource buffers.
+    labels : list[str]
+        Names of the sampled dimensions, in column order.
+    n_local_steps_per_loop : int
+        Local steps recorded per loop, after thinning.
+    n_global_steps_per_loop : int
+        Global steps recorded per loop, after thinning.
+    """
     if "positions_production" not in resources:
         return
 
@@ -725,7 +627,13 @@ def _save_samples(
 
 
 def _save_loss(resources: dict) -> None:
-    """Overwrites the training loss dataset in the HDF5 file."""
+    """Overwrite the training loss dataset in the HDF5 file.
+
+    Parameters
+    ----------
+    resources : dict
+        The sampler's resource buffers. A missing loss buffer is skipped.
+    """
     if "loss_buffer" not in resources:
         return
 
@@ -734,6 +642,12 @@ def _save_loss(resources: dict) -> None:
 
 
 class FlowMCBase(AnalysisBase):
+    """Sampler mixin that runs the analysis with flowMC.
+
+    Mixed with a data-representation base, which supplies ``run`` and ``read_data``, and
+    with a model family's ``Core`` class. Selected at runtime by ``sampler_cfg.json``.
+    """
+
     def driver(
         self,
         *,
@@ -742,29 +656,30 @@ class FlowMCBase(AnalysisBase):
         data: Dict[str, Any],
         labels: List[str],
     ) -> None:
+        """Run flowMC over the given log posterior and data.
+
+        Chains are started from prior draws, so the initial positions are automatically
+        within the support. The sampler configuration is written to the output HDF5 before
+        sampling starts, so the run can be reconstructed from the output file alone. The
+        debugging flags ``debug_nans``, ``profile_memory`` and ``check_leaks`` each wrap the
+        run differently; they are mutually exclusive, the first set winning.
+
+        Parameters
+        ----------
+        logpdf : Callable[[Array, Dict[str, Any]], Array]
+            The log posterior built by :mod:`gwkokab.inference`.
+        priors : JointDistribution
+            Joint prior over the sampled variables, used to draw the initial chain positions.
+        data : Dict[str, Any]
+            The event data, passed through to ``logpdf`` on every evaluation.
+        labels : List[str]
+            Names of the sampled dimensions, in ``variables_index`` order.
+        """
         sampler_cfg: FlowMCGlobalConfig = self.sampler_cfg
 
         n_chains = sampler_cfg.n_chains
         initial_position = priors.sample(self.rng_key, (n_chains,))
         n_dims = initial_position.shape[1]
-
-        mass_matrix = sampler_cfg.mass_matrix
-        if isinstance(mass_matrix, float) or isinstance(mass_matrix, int):
-            if mass_matrix <= 0.0:
-                raise LoggedValueError("mass_matrix must be positive")
-            mass_matrix = jnp.eye(n_dims) * float(mass_matrix)
-
-        if mass_matrix.ndim > 2:
-            raise LoggedValueError("mass_matrix must be 1D or 2D array")
-        _shape = mass_matrix.shape
-        if _shape != (n_dims, n_dims) and _shape != (n_dims,):
-            raise LoggedValueError(
-                f"mass_matrix must be of shape ({n_dims}, {n_dims}) or ({n_dims},), got {_shape}"
-            )
-        if _shape == (n_dims,):
-            if jnp.any(mass_matrix <= 0):
-                raise LoggedValueError("mass_matrix diagonal elements must be positive")
-            mass_matrix = jnp.diag(mass_matrix)
 
         bundle = Local_Global_Sampler_Bundle(
             rng_key=self.rng_key,
@@ -778,7 +693,7 @@ class FlowMCBase(AnalysisBase):
             n_epochs=sampler_cfg.n_epochs,
             local_sampler_name=sampler_cfg.local_sampler_name,
             step_size=sampler_cfg.step_size,
-            mass_matrix=mass_matrix,
+            condition_matrix=sampler_cfg.condition_matrix,
             n_leapfrog=sampler_cfg.n_leapfrog,
             chain_batch_size=sampler_cfg.chain_batch_size,
             rq_spline_hidden_units=sampler_cfg.rq_spline_hidden_units,
@@ -797,38 +712,7 @@ class FlowMCBase(AnalysisBase):
         logger.success("Local_Global_Sampler_Bundle created.")
 
         logger.info("Saving sampler configuration to HDF5.")
-        write_to_hdf5(
-            INFERENCE_OUTPUT_FILENAME,
-            dataset_path="sampler_cfg",
-            mode="a",
-            attrs={
-                "sampler_name": "flowMC",
-                "n_chains": n_chains,
-                "n_dims": n_dims,
-                "n_local_steps": sampler_cfg.n_local_steps,
-                "n_global_steps": sampler_cfg.n_global_steps,
-                "n_training_loops": sampler_cfg.n_training_loops,
-                "n_production_loops": sampler_cfg.n_production_loops,
-                "n_epochs": sampler_cfg.n_epochs,
-                "local_sampler_name": sampler_cfg.local_sampler_name,
-                "step_size": sampler_cfg.step_size,
-                "mass_matrix": mass_matrix,
-                "n_leapfrog": sampler_cfg.n_leapfrog,
-                "chain_batch_size": sampler_cfg.chain_batch_size,
-                "rq_spline_hidden_units": sampler_cfg.rq_spline_hidden_units,
-                "rq_spline_n_bins": sampler_cfg.rq_spline_n_bins,
-                "rq_spline_n_layers": sampler_cfg.rq_spline_n_layers,
-                "rq_spline_range": sampler_cfg.rq_spline_range,
-                "learning_rate": sampler_cfg.learning_rate,
-                "batch_size": sampler_cfg.batch_size,
-                "n_max_examples": sampler_cfg.n_max_examples,
-                "history_window": sampler_cfg.history_window,
-                "local_thinning": sampler_cfg.local_thinning,
-                "global_thinning": sampler_cfg.global_thinning,
-                "n_NFproposal_batch_size": sampler_cfg.n_NFproposal_batch_size,
-                "verbose": sampler_cfg.verbose,
-            },
-        )
+        sampler_cfg.write_to_hdf5(INFERENCE_OUTPUT_FILENAME, n_dims=n_dims)
         logger.success("Sampler configuration saved.")
 
         sampler = Sampler(
