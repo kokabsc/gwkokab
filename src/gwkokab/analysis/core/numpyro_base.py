@@ -1,6 +1,20 @@
 # Copyright 2023 The GWKokab Authors
 # SPDX-License-Identifier: Apache-2.0
 
+"""The NumPyro sampler backend.
+
+:class:`NumpyroBase` supplies ``driver`` for analyses run with NumPyro's NUTS. Chains
+are run in batches sized to the available devices and each batch is written to the
+output HDF5 as it finishes, so a long run leaves usable partial output rather than
+nothing.
+
+The backend is chosen at runtime from ``sampler_cfg.json``'s ``sampler_name``, not by
+the console script.
+
+See Also
+--------
+gwkokab.analysis.core.flowMC_base : The alternative sampler backend.
+"""
 
 import warnings
 from collections.abc import Callable
@@ -29,6 +43,20 @@ from gwkokab.utils.exceptions import LoggedUserWarning
 
 
 def _save_inference_data(samples: Any, start_chain_idx: int) -> None:
+    """Append one batch of chains to the output HDF5.
+
+    Samples are written twice over: flattened into the cumulative ``samples`` dataset,
+    and separately per chain under ``chains/chain_<n>``, so that both pooled posteriors
+    and per-chain diagnostics are available afterwards.
+
+    Parameters
+    ----------
+    samples : Any
+        The batch's samples, grouped by chain and keyed by site name.
+    start_chain_idx : int
+        Index of the first chain in this batch, so chain groups are numbered
+        consistently across batches.
+    """
     samples_per_chain = np.stack([samples[key] for key in samples.keys()], axis=-1)
     combined_samples = np.concatenate(samples_per_chain, axis=0)
 
@@ -64,6 +92,24 @@ def _run_mcmc(
     mcmc_cfg: NumpyroMCMCConfig,
     data: Dict[str, Any],
 ):
+    """Run every chain, in device-sized batches, saving as it goes.
+
+    The chain method is reconciled with the devices actually present: with more than one
+    device anything but ``"parallel"`` is overridden, and a batch size of one falls back
+    to ``"sequential"``. Chains are then run ``batch_size`` at a time, with any remainder
+    run in a final short batch.
+
+    Parameters
+    ----------
+    key : PRNGKeyArray
+        JAX random key, split once per batch.
+    kernel : numpyro.infer.NUTS
+        The configured NUTS kernel.
+    mcmc_cfg : NumpyroMCMCConfig
+        Chain counts, warmup, thinning and progress settings.
+    data : Dict[str, Any]
+        Keyword arguments passed to the NumPyro model on each run.
+    """
     n_devices = jax.device_count()
     chain_method = mcmc_cfg.chain_method
     if chain_method != "parallel" and n_devices > 1:
@@ -100,7 +146,20 @@ def _run_mcmc(
     )
 
     def _run_batch_and_save(key: PRNGKeyArray, chain_idx: int) -> PRNGKeyArray:
-        """Runs a batch of MCMC chains, prints summary, and saves the data."""
+        """Run one batch of MCMC chains, print the summary, and save the data.
+
+        Parameters
+        ----------
+        key : PRNGKeyArray
+            JAX random key; split so the returned key is fresh for the next batch.
+        chain_idx : int
+            Index of the first chain in this batch.
+
+        Returns
+        -------
+        PRNGKeyArray
+            The advanced key.
+        """
         key, subkey = jrd.split(key)
         mcmc.run(subkey, **data)
         samples = mcmc.get_samples(group_by_chain=True)
@@ -119,6 +178,12 @@ def _run_mcmc(
 
 
 class NumpyroBase(AnalysisBase):
+    """Sampler mixin that runs the analysis with NumPyro's NUTS.
+
+    Mixed with a data-representation base, which supplies ``run`` and ``read_data``, and
+    with a model family's ``Core`` class. Selected at runtime by ``sampler_cfg.json``.
+    """
+
     def driver(
         self,
         *,
@@ -127,6 +192,25 @@ class NumpyroBase(AnalysisBase):
         data: Dict[str, Any],
         labels: List[str],
     ) -> None:
+        """Run NUTS over the given model and data.
+
+        The sampler configuration is written to the output HDF5 before sampling starts, so
+        the run can be reconstructed from the output file alone. The debugging flags
+        ``debug_nans``, ``profile_memory`` and ``check_leaks`` each wrap the run
+        differently; they are mutually exclusive, the first set winning.
+
+        Parameters
+        ----------
+        logpdf : Callable[[Array, Dict[str, Any]], Array]
+            The NumPyro model built by :mod:`gwkokab.inference`.
+        priors : JointDistribution
+            Unused; NumPyro draws each hyper-parameter at its own ``sample`` site, so the
+            priors are already baked into the model.
+        data : Dict[str, Any]
+            Keyword arguments passed to the model.
+        labels : List[str]
+            Unused; NumPyro's sites carry their own names.
+        """
         del labels
         del priors
 
@@ -149,42 +233,7 @@ class NumpyroBase(AnalysisBase):
         logger.success("NUTS Kernel initialized.")
 
         logger.info("Saving sampler configuration to HDF5.")
-        with h5py.File(INFERENCE_OUTPUT_FILENAME, "a") as f:
-            write_to_hdf5(
-                f,
-                dataset_path="sampler_cfg",
-                attrs={"sampler_name": "numpyro"},
-            )
-            write_to_hdf5(
-                f,
-                dataset_path="sampler_cfg/kernel",
-                attrs={
-                    "adapt_mass_matrix": sampler_cfg.kernel.adapt_mass_matrix,
-                    "adapt_step_size": sampler_cfg.kernel.adapt_step_size,
-                    "dense_mass": sampler_cfg.kernel.dense_mass,
-                    "find_heuristic_step_size": sampler_cfg.kernel.find_heuristic_step_size,
-                    "forward_mode_differentiation": sampler_cfg.kernel.forward_mode_differentiation,
-                    "inverse_mass_matrix": sampler_cfg.kernel.inverse_mass_matrix,
-                    "max_tree_depth": sampler_cfg.kernel.max_tree_depth,
-                    "regularize_mass_matrix": sampler_cfg.kernel.regularize_mass_matrix,
-                    "step_size": sampler_cfg.kernel.step_size,
-                    "target_accept_prob": sampler_cfg.kernel.target_accept_prob,
-                },
-            )
-            write_to_hdf5(
-                f,
-                dataset_path="sampler_cfg/mcmc",
-                attrs={
-                    "chain_method": sampler_cfg.mcmc.chain_method,
-                    "jit_model_args": sampler_cfg.mcmc.jit_model_args,
-                    "num_chains": sampler_cfg.mcmc.num_chains,
-                    "num_samples": sampler_cfg.mcmc.num_samples,
-                    "num_warmup": sampler_cfg.mcmc.num_warmup,
-                    "progress_bar": sampler_cfg.mcmc.progress_bar,
-                    "progress_rate": sampler_cfg.mcmc.progress_rate,
-                    "thinning": sampler_cfg.mcmc.thinning,
-                },
-            )
+        sampler_cfg.write_to_hdf5(INFERENCE_OUTPUT_FILENAME)
         logger.success("Sampler configuration saved.")
 
         mcmc_cfg = sampler_cfg.mcmc

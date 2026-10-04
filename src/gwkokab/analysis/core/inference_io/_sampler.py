@@ -1,23 +1,39 @@
 # Copyright 2023 The GWKokab Authors
 # SPDX-License-Identifier: Apache-2.0
 
+"""Sampler configuration: ``sampler_cfg.json``.
+
+The ``sampler_name`` field is a Pydantic discriminator that selects
+:class:`NumpyroGlobalConfig` or :class:`FlowMCGlobalConfig`, and with it the sampler
+backend the run will use -- the choice is made here, at runtime, rather than by the
+console script.
+
+Both configurations round-trip through HDF5 (:meth:`~NumpyroGlobalConfig.write_to_hdf5`
+and :meth:`~NumpyroGlobalConfig.read_from_hdf5`), which is what lets the post-hoc
+scripts reconstruct a run from its output file alone. The ``gwk_numpyro_cfg_template``
+and ``gwk_flowMC_cfg_template`` console scripts dump starter configurations.
+"""
 
 import ast
 from typing import Annotated, Literal
 
+import h5py
 import numpy as np
 from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
     Field,
+    field_validator,
     PlainSerializer,
     PositiveFloat,
     PositiveInt,
     TypeAdapter,
 )
 
+from gwkokab.analysis.core.utils import read_attrs_from_hdf5, write_to_hdf5
 from gwkokab.analysis.utils.common import read_json
+from gwkokab.utils.exceptions import LoggedValueError
 
 
 def _nd_array_before_validator(arr: str | list | np.ndarray) -> np.ndarray:
@@ -252,7 +268,7 @@ class NumpyroGlobalConfig(BaseModel):
     """Configuration for the MCMC sampling procedure."""
 
     @classmethod
-    def from_json(cls, config_path: str) -> "NumpyroGlobalConfig":
+    def read_from_json(cls, config_path: str) -> "NumpyroGlobalConfig":
         """Initializes the loader from a JSON configuration file.
 
         Parameters
@@ -267,6 +283,84 @@ class NumpyroGlobalConfig(BaseModel):
         """
         sampler_cfg = read_json(config_path)
         return cls.model_validate(sampler_cfg)
+
+    def write_to_hdf5(self, path: str | h5py.File | h5py.Group) -> None:
+        """Write the configuration to the output HDF5 file.
+
+        Stored as attributes under ``sampler_cfg``, split into a ``kernel`` and an ``mcmc``
+        group, so that :meth:`read_from_hdf5` can rebuild the configuration from the output
+        file alone.
+
+        Parameters
+        ----------
+        path : str | h5py.File | h5py.Group
+            Destination file or group.
+        """
+        write_to_hdf5(
+            path,
+            dataset_path="sampler_cfg",
+            attrs={"sampler_name": "numpyro"},
+        )
+        write_to_hdf5(
+            path,
+            dataset_path="sampler_cfg/kernel",
+            attrs={
+                "adapt_mass_matrix": self.kernel.adapt_mass_matrix,
+                "adapt_step_size": self.kernel.adapt_step_size,
+                "dense_mass": self.kernel.dense_mass,
+                "find_heuristic_step_size": self.kernel.find_heuristic_step_size,
+                "forward_mode_differentiation": self.kernel.forward_mode_differentiation,
+                "inverse_mass_matrix": self.kernel.inverse_mass_matrix,
+                "max_tree_depth": self.kernel.max_tree_depth,
+                "regularize_mass_matrix": self.kernel.regularize_mass_matrix,
+                "step_size": self.kernel.step_size,
+                "target_accept_prob": self.kernel.target_accept_prob,
+            },
+        )
+        write_to_hdf5(
+            path,
+            dataset_path="sampler_cfg/mcmc",
+            attrs={
+                "chain_method": self.mcmc.chain_method,
+                "jit_model_args": self.mcmc.jit_model_args,
+                "num_chains": self.mcmc.num_chains,
+                "num_samples": self.mcmc.num_samples,
+                "num_warmup": self.mcmc.num_warmup,
+                "progress_bar": self.mcmc.progress_bar,
+                "progress_rate": self.mcmc.progress_rate,
+                "thinning": self.mcmc.thinning,
+            },
+        )
+
+    @classmethod
+    def read_from_hdf5(
+        cls, path: str | h5py.File | h5py.Group
+    ) -> "NumpyroGlobalConfig":
+        """Initializes the loader from an HDF5 configuration file.
+
+        Parameters
+        ----------
+        path : str | h5py.File | h5py.Group
+            Path or file descriptor to the HDF5 file containing loader settings.
+
+        Returns
+        -------
+        NumpyroGlobalConfig
+            An instance of NumpyroGlobalConfig.
+        """
+        sampler_name = read_attrs_from_hdf5(path, "sampler_cfg")["sampler_name"]
+        if sampler_name != "numpyro":
+            raise LoggedValueError(
+                f"Expected sampler_name 'numpyro', but got '{sampler_name}'"
+            )
+
+        kernel_attrs = read_attrs_from_hdf5(path, "sampler_cfg/kernel")
+        mcmc_attrs = read_attrs_from_hdf5(path, "sampler_cfg/mcmc")
+
+        kernel_cfg = NumpyroNUTSSamplerConfig.model_validate(kernel_attrs)
+        mcmc_cfg = NumpyroMCMCConfig.model_validate(mcmc_attrs)
+
+        return cls(sampler_name=sampler_name, kernel=kernel_cfg, mcmc=mcmc_cfg)
 
 
 class FlowMCGlobalConfig(BaseModel):
@@ -336,8 +430,10 @@ class FlowMCGlobalConfig(BaseModel):
     n_leapfrog: PositiveInt = Field(default=10)
     """Number of leapfrog steps per HMC trajectory (ignored if using MALA)."""
 
-    mass_matrix: PositiveFloat | NumPyArrayTypeForPydantic = Field(default=1.0)
-    """Mass matrix diagonal elements or scalar value for HMC trajectory dynamics."""
+    condition_matrix: PositiveFloat | NumPyArrayTypeForPydantic = Field(default=1.0)
+    """Condition matrix diagonal elements or scalar value for HMC trajectory
+    dynamics.
+    """
 
     learning_rate: PositiveFloat = Field(default=1e-3)
     """Learning rate for the Normalizing Flow optimizer."""
@@ -361,8 +457,47 @@ class FlowMCGlobalConfig(BaseModel):
     verbose: bool = Field(default=False)
     """If True, prints execution progress logs and loss metrics to the console."""
 
+    @field_validator("condition_matrix")
     @classmethod
-    def from_json(cls, config_path: str) -> "FlowMCGlobalConfig":
+    def condition_matrix_validator(
+        cls, condition_matrix: PositiveFloat | NumPyArrayTypeForPydantic
+    ) -> PositiveFloat | np.ndarray:
+        """Validate the local sampler's condition matrix.
+
+        Parameters
+        ----------
+        condition_matrix : PositiveFloat | NumPyArrayTypeForPydantic
+            Either a single positive scalar, applied to every dimension, or a
+            one-dimensional array of positive per-dimension values.
+
+        Returns
+        -------
+        PositiveFloat | np.ndarray
+            The validated value, unchanged.
+
+        Raises
+        ------
+        ValueError
+            If a scalar is not positive, or an array is not one-dimensional with every
+            element positive.
+        """
+        if isinstance(condition_matrix, (int, float)):
+            if condition_matrix <= 0:
+                raise ValueError(
+                    "condition_matrix must be a positive float or a positive array."
+                )
+        elif isinstance(condition_matrix, np.ndarray):
+            if condition_matrix.ndim != 1:
+                raise ValueError(
+                    "condition_matrix must be a 1D array if provided as a NumPy array."
+                )
+            if not np.all(condition_matrix > 0):
+                raise ValueError("All elements of condition_matrix must be positive.")
+
+        return condition_matrix
+
+    @classmethod
+    def read_from_json(cls, config_path: str) -> "FlowMCGlobalConfig":
         """Initializes the loader from a JSON configuration file.
 
         Parameters
@@ -376,14 +511,86 @@ class FlowMCGlobalConfig(BaseModel):
             An instance of FlowMCGlobalConfig.
         """
         sampler_cfg = read_json(config_path)
-        return cls.model_validate(**sampler_cfg)
+        return cls.model_validate(sampler_cfg)
+
+    def write_to_hdf5(
+        self, path: str | h5py.File | h5py.Group, *, n_dims: int | None = None
+    ) -> None:
+        """Writes the FlowMC configuration to an HDF5 file.
+
+        Parameters
+        ----------
+        path : str | h5py.File | h5py.Group
+            Path or file descriptor to the HDF5 file where the configuration will be saved.
+        n_dims : int | None, optional
+            The number of dimensions in the parameter space. If not provided, it must be
+            specified when calling this method, otherwise a ValueError will be raised.
+        """
+        if n_dims is None:
+            raise LoggedValueError(
+                "n_dims must be specified when writing FlowMC configuration to HDF5."
+            )
+        write_to_hdf5(
+            path,
+            dataset_path="sampler_cfg",
+            mode="a",
+            attrs={
+                "sampler_name": self.sampler_name,
+                "n_chains": self.n_chains,
+                "n_dims": n_dims,
+                "n_local_steps": self.n_local_steps,
+                "n_global_steps": self.n_global_steps,
+                "n_training_loops": self.n_training_loops,
+                "n_production_loops": self.n_production_loops,
+                "n_epochs": self.n_epochs,
+                "local_sampler_name": self.local_sampler_name,
+                "step_size": self.step_size,
+                "condition_matrix": self.condition_matrix,
+                "n_leapfrog": self.n_leapfrog,
+                "chain_batch_size": self.chain_batch_size,
+                "rq_spline_hidden_units": self.rq_spline_hidden_units,
+                "rq_spline_n_bins": self.rq_spline_n_bins,
+                "rq_spline_n_layers": self.rq_spline_n_layers,
+                "rq_spline_range": self.rq_spline_range,
+                "learning_rate": self.learning_rate,
+                "batch_size": self.batch_size,
+                "n_max_examples": self.n_max_examples,
+                "history_window": self.history_window,
+                "local_thinning": self.local_thinning,
+                "global_thinning": self.global_thinning,
+                "n_NFproposal_batch_size": self.n_NFproposal_batch_size,
+                "verbose": self.verbose,
+            },
+        )
+
+    @classmethod
+    def read_from_hdf5(cls, path: str | h5py.File | h5py.Group) -> "FlowMCGlobalConfig":
+        """Initializes the loader from an HDF5 configuration file.
+
+        Parameters
+        ----------
+        path : str | h5py.File | h5py.Group
+            Path or file descriptor to the HDF5 file containing loader settings.
+
+        Returns
+        -------
+        FlowMCGlobalConfig
+            An instance of FlowMCGlobalConfig.
+        """
+        attrs = read_attrs_from_hdf5(path, "sampler_cfg")
+        if attrs.get("sampler_name") != "flowMC":
+            raise LoggedValueError(
+                f"Expected sampler_name 'flowMC', but got '{attrs.get('sampler_name')}'"
+            )
+        attrs.pop("n_dims", None)
+        return cls.model_validate(attrs)
 
 
 class SamplerConfig:
     """Factory interface for generating Sampler Configs."""
 
     @staticmethod
-    def from_json(config_path: str) -> NumpyroGlobalConfig | FlowMCGlobalConfig:
+    def read_from_json(config_path: str) -> NumpyroGlobalConfig | FlowMCGlobalConfig:
         """Initializes and returns the specific config instance directly from JSON."""
         SamplerConfigAdapter: TypeAdapter[NumpyroGlobalConfig | FlowMCGlobalConfig] = (
             TypeAdapter(
@@ -396,8 +603,29 @@ class SamplerConfig:
         sampler_cfg = read_json(config_path)
         return SamplerConfigAdapter.validate_python(sampler_cfg)
 
+    @staticmethod
+    def read_from_hdf5(
+        path: str | h5py.File | h5py.Group,
+    ) -> NumpyroGlobalConfig | FlowMCGlobalConfig:
+        """Initializes and returns the specific config instance directly from HDF5."""
+        attrs = read_attrs_from_hdf5(path, "sampler_cfg")
+        sampler_name = attrs.get("sampler_name")
+        if sampler_name == "numpyro":
+            return NumpyroGlobalConfig.read_from_hdf5(path)
+        elif sampler_name == "flowMC":
+            return FlowMCGlobalConfig.read_from_hdf5(path)
+        else:
+            raise LoggedValueError(
+                f"Unsupported or missing sampler_name '{sampler_name}' in HDF5 file."
+            )
+
 
 def _dump_numpyro_cfg() -> None:
+    """Console script entry point: dump a starter NumPyro sampler configuration.
+
+    Writes a JSON file carrying the defaults of :class:`NumpyroGlobalConfig`, so the
+    knobs can be adjusted rather than written from scratch.
+    """
     import argparse
     from argparse import ArgumentDefaultsHelpFormatter
 
@@ -426,6 +654,11 @@ def _dump_numpyro_cfg() -> None:
 
 
 def _dump_flowMC_cfg() -> None:
+    """Console script entry point: dump a starter flowMC sampler configuration.
+
+    Writes a JSON file carrying the defaults of :class:`FlowMCGlobalConfig`, so the
+    knobs can be adjusted rather than written from scratch.
+    """
     import argparse
     from argparse import ArgumentDefaultsHelpFormatter
 

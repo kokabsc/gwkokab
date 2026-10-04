@@ -8,7 +8,7 @@ files = "src||scripts||tests||examples"
 
 [[repos]]
 repo = "https://github.com/astral-sh/ruff-pre-commit"
-rev = "v0.15.17"
+rev = "v0.16.4"
 hooks = [
     {
         id = "ruff-check",
@@ -20,7 +20,7 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/igorshubovych/markdownlint-cli"
-rev = "v0.49.0"
+rev = "v0.49.1"
 hooks = [
     {
         id = "markdownlint",
@@ -30,7 +30,7 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/codespell-project/codespell"
-rev = "v2.4.2"
+rev = "v2.4.3"
 hooks = [
     {
         id = "codespell",
@@ -59,7 +59,7 @@ hooks = [{ id = "yamlfmt", args = ["-formatter", "retain_line_breaks=true"] }]
 repo = "https://github.com/pre-commit/pre-commit-hooks"
 rev = "v6.0.0"
 hooks = [
-    { id = "check-added-large-files" },
+    { id = "check-added-large-files", args = ["--maxkb=10000"] },
     { id = "check-case-conflict" },
     { id = "check-merge-conflict" },
     { id = "check-symlinks" },
@@ -96,7 +96,7 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/python-jsonschema/check-jsonschema"
-rev = "0.37.3"
+rev = "0.38.0"
 hooks = [
     { id = "check-dependabot" },
     { id = "check-github-workflows" },
@@ -105,7 +105,7 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/abravalheri/validate-pyproject"
-rev = "v0.25"
+rev = "0.26"
 hooks = [{ id = "validate-pyproject" }]
 
 [[repos]]
@@ -147,5 +147,5 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/tombi-toml/tombi-pre-commit"
-rev = "v1.1.2"
+rev = "v1.4.1"
 hooks = [{ id = "tombi-format" }, { id = "tombi-lint" }]

@@ -8,6 +8,22 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+"""Reading and reweighting sensitivity injection files.
+
+Injection releases differ between observing runs in their column names, in whether they
+report a false alarm rate at all, and in how the draw density is stored -- as a single
+``sampling_pdf``, as one joint ``lnpdraw_*`` column, or as a set of factors to be
+summed. :func:`load_injection_data` absorbs those differences and returns one dictionary
+in a common form.
+
+:func:`apply_injection_prior` then changes coordinates from the ones the injections were
+drawn in (component masses, Cartesian spins, redshift) to whichever the analysis uses,
+carrying the Jacobian into the ``prior`` entry so the importance weights stay correct.
+
+This module is adapted from
+`gwpopulation <https://github.com/ColmTalbot/gwpopulation>`_
+and carries its own copyright notice.
+"""
 
 from typing import Dict, List, Tuple
 
@@ -75,6 +91,35 @@ def get_found_injections(
     ifar_threshold: float = 1.0,
     snr_threshold: float = 10.0,
 ):
+    """Select the injections a search recovered.
+
+    Whichever criterion the file supports is used: an inverse false alarm rate threshold
+    where FAR or IFAR columns are present -- an injection counts as found if *any*
+    pipeline recovers it -- and an SNR threshold otherwise, which is the case for O1 and
+    O2 where the pipelines report no FAR.
+
+    Parameters
+    ----------
+    data : Dict[str, Array]
+        The injection columns, or a read-only HDF5 group standing in for them.
+    shape : Tuple[int, ...]
+        Shape of the boolean mask to build, i.e. of one injection column.
+    ifar_threshold : float, optional
+        Threshold on inverse false alarm rate, in years. Defaults to ``1.0``;
+        :data:`None` disables the cut.
+    snr_threshold : float, optional
+        SNR threshold. Defaults to ``10.0``.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask of shape ``shape``, true for found injections.
+
+    Raises
+    ------
+    ValueError
+        If the file carries neither a FAR/IFAR column nor a recognised SNR column.
+    """
     found = np.zeros(shape, dtype=bool)
     has_ifar = any(["ifar" in key.lower() for key in data.keys()])
 
@@ -89,19 +134,28 @@ def get_found_injections(
         )
     )
 
-    if not has_ifar and len(far_keys) > 0:
-        for far_key in far_keys:
-            data[far_key.replace("far", "ifar")] = 1 / data[far_key][()]
+    if has_ifar:
+        ifar_values = {
+            key: data[key][()] for key in data.keys() if "ifar" in key.lower()
+        }
+    elif len(far_keys) > 0:
+        # `data` may be a read-only HDF5 group, so the inverse false alarm rates
+        # derived from the FAR columns are kept locally rather than written back.
+        ifar_values = {
+            far_key.replace("far", "ifar"): 1 / data[far_key][()]
+            for far_key in far_keys
+        }
         has_ifar = True
+    else:
+        ifar_values = {}
     if ifar_threshold is None:
         ifar_threshold = 1e300
     if has_ifar:
-        for key in data:
-            if "ifar" in key.lower():
-                found |= data[key][()] > ifar_threshold
-            if "name" in data.keys():
-                gwtc1 = (data["name"][()] == b"o1") | (data["name"][()] == b"o2")
-                found |= gwtc1 & (data["optimal_snr_net"][()] > snr_threshold)
+        for ifar in ifar_values.values():
+            found |= ifar > ifar_threshold
+        if "name" in data.keys():
+            gwtc1 = (data["name"][()] == b"o1") | (data["name"][()] == b"o2")
+            found |= gwtc1 & (data["optimal_snr_net"][()] > snr_threshold)
         if "semianalytic_observed_phase_maximized_snr_net" in data.keys():
             found |= (
                 data["semianalytic_observed_phase_maximized_snr_net"][()]
@@ -249,8 +303,8 @@ def load_injection_data(
         for ii in [1, 2]:
             gwpop_data[f"a_{ii}"] = (
                 np.asarray(
-                    data.get(f"spin{ii}x", np.zeros(n_found))[()][found] ** 2
-                    + data.get(f"spin{ii}y", np.zeros(n_found))[()][found] ** 2
+                    data.get(f"spin{ii}x", np.zeros(found_shape))[()][found] ** 2
+                    + data.get(f"spin{ii}y", np.zeros(found_shape))[()][found] ** 2
                     + data[f"spin{ii}z"][()][found] ** 2
                 )
                 ** 0.5
@@ -307,8 +361,32 @@ def load_injection_data(
 
 
 def apply_injection_prior(data: Dict[str, Array], parameters: List[str]):
-    """We assume the injection prior in terms of the source frame primary mass and mass
-    ratio.
+    r"""Derive the analysis coordinates and carry the draw density across.
+
+    The injections are drawn in source-frame component masses, Cartesian spins and
+    redshift. For each coordinate the analysis asks for, this adds the corresponding
+    column to ``data`` and multiplies the ``prior`` entry by the Jacobian of the change
+    of variables, so the importance weights of
+    :func:`~gwkokab.poisson_mean.poisson_mean_from_sensitivity_injections` remain
+    correct.
+
+    The spin coordinates are the interesting case: :math:`\chi_{\text{eff}}` and
+    :math:`\chi_p` are not invertible functions of the drawn spins, so the induced
+    density has no Jacobian and is instead supplied analytically by
+    :mod:`~gwkokab.poisson_mean._analytic_spin_prior`, assuming isotropic spin
+    orientations with :math:`a_{\max} = 1`.
+
+    Parameters
+    ----------
+    data : Dict[str, Array]
+        Injection data as returned by :func:`load_injection_data`. Modified in place.
+    parameters : List[str]
+        Names of the coordinates the analysis needs.
+
+    Returns
+    -------
+    Dict[str, Array]
+        ``data``, with the requested coordinates added and ``prior`` updated.
     """
     if P.MASS_RATIO in parameters:
         data[P.MASS_RATIO] = data[P.SECONDARY_MASS_SOURCE] / data[P.PRIMARY_MASS_SOURCE]
