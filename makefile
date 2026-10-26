@@ -1,3 +1,4 @@
+ENV_VARS        := RAYON_NUM_THREADS=2 UV_CONCURRENT_INSTALLS=2 UV_CONCURRENT_DOWNLOADS=4
 PIP             := pip
 UV              := uv
 TARGET          := gwkokab
@@ -18,7 +19,7 @@ PIP_FLAGS_LIST  := $(subst $(comma),$(space),$(PIP_FLAGS))
 .PHONY: all install uninstall cache_clean help doc check-uv
 
 install: uninstall check-uv
-	GWKOKAB_DEV_BUILD=1 $(UV) $(PIP) install $(PIP_FLAGS_LIST) \
+	GWRAVI_DEV_BUILD=1 $(ENV_VARS) $(UV) $(PIP) install $(PIP_FLAGS_LIST) \
 		-e $(INSTALL_TARGET) -r pyproject.toml \
 		$(EXTRA_FLAGS) $(GROUP_FLAGS)
 
