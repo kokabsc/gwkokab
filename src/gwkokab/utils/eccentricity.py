@@ -3,10 +3,10 @@
 
 """Approximate quadrupole transport of model-native eccentricity.
 
-This is a quick global ansatz, not a waveform-based eccentricity conversion.
-Frequencies are quadrupole GW frequencies in the same frame. See Peters,
-Phys. Rev. 136, B1224 (1964), ADS key ``1964PhRv..136.1224P``.
-These NumPy routines run while loading data, outside the JAX likelihood.
+This is a quick global ansatz, not a waveform-based eccentricity conversion. Frequencies
+are quadrupole GW frequencies in the same frame. See Peters, Phys. Rev. 136, B1224
+(1964), ADS key ``1964PhRv..136.1224P``. These NumPy routines run while loading data,
+outside the JAX likelihood.
 """
 
 from typing import Literal

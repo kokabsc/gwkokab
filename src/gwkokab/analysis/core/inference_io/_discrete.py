@@ -174,9 +174,9 @@ class DiscretePELoader(BaseModel):
     )
     """Complete per-file overrides keyed by filename stem, including native frequency.
 
-    Once enabled, every loaded event must have a configuration and share the same
-    target source frequency and evolution prescription. This prevents mixing native
-    and transported eccentricities in one population fit.
+    Once enabled, every loaded event must have a configuration and share the same target
+    source frequency and evolution prescription. This prevents mixing native and
+    transported eccentricities in one population fit.
     """
 
     _eccentricity_diagnostics: dict = PrivateAttr(default_factory=dict)

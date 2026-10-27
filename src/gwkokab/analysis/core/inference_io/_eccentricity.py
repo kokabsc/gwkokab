@@ -19,17 +19,19 @@ ECCENTRICITY_LOG_PRIOR_COLUMN = "_gwkokab_log_eccentricity_prior"
 class EccentricityEvolutionConfig(BaseModel):
     """Opt-in quadrupole transport with a native uniform eccentricity prior.
 
-    Frequencies must be audited from the waveform interface/run configuration.
-    No starting-frequency, reference-frequency or prior-bound guessing is done.
-    The full Peters inverse is a global ansatz and is the default backstop.
+    Frequencies must be audited from the waveform interface/run configuration. No
+    starting-frequency, reference-frequency or prior-bound guessing is done. The full
+    Peters inverse is a global ansatz and is the default backstop.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     native_frequency_hz: float = Field(gt=0, allow_inf_nan=False)
     """Audited frequency defining the native eccentricity (not likelihood cutoff)."""
+
     native_frequency_frame: Literal["detector", "source"]
     """Frame of the audited native frequency; must be explicitly supplied."""
+
     reference_frequency_source_hz: float = Field(
         default=10.0, gt=0, allow_inf_nan=False
     )
@@ -73,9 +75,9 @@ class EccentricityEvolutionConfig(BaseModel):
     def reference_prior_support(self, redshift) -> tuple[np.ndarray, np.ndarray]:
         """Return transformed native-prior bounds at the supplied redshifts.
 
-        These are PE support bounds, not a population-coverage certificate.
-        Checking candidate populations requires their full joint redshift domain,
-        not only posterior redshifts. Small-e bounds may formally exceed unity.
+        These are PE support bounds, not a population-coverage certificate. Checking
+        candidate populations requires their full joint redshift domain, not only
+        posterior redshifts. Small-e bounds may formally exceed unity.
         """
         z = np.asarray(redshift, dtype=float)
         ratio = self._frequency_ratio(z)
@@ -103,9 +105,9 @@ class EccentricityEvolutionConfig(BaseModel):
     ) -> pd.DataFrame:
         """Condition native rows, then transport eccentricity and its PE prior.
 
-        Return a copy with the eccentricity column replaced, all other columns
-        and row alignment intact, and a reserved log reference-prior column.
-        Subsample the returned whole rows, never the eccentricity alone.
+        Return a copy with the eccentricity column replaced, all other columns and row
+        alignment intact, and a reserved log reference-prior column. Subsample the
+        returned whole rows, never the eccentricity alone.
         """
         if eccentricity_column == redshift_column:
             raise LoggedValueError(
