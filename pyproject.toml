@@ -25,9 +25,10 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "RIFT>=0.0.15.11",
+    "RIFT>=0.0.18.0rc6",
     "arviz>=0.20.0",
     "chex>=0.1.87",
     "corner>=2.2.3",
